@@ -13,6 +13,7 @@ const allowedOrigins = new Set([
   "http://localhost:3000",
   "http://localhost:5173",
   "http://localhost:5174",
+  "https://turfbooking1.netlify.app",
 ]);
 const localDevOrigin = /^http:\/\/(localhost|127\.0\.0\.1):\d+$/;
 
