@@ -2,6 +2,17 @@ const express = require("express");
 const router = express.Router();
 const fetch = require("node-fetch");
 const nodemailer = require("nodemailer");
+// Optional SendGrid fallback (recommended for reliable delivery on hosted platforms)
+let sendgrid = null;
+if (process.env.SENDGRID_API_KEY) {
+  try {
+    sendgrid = require("@sendgrid/mail");
+    sendgrid.setApiKey(process.env.SENDGRID_API_KEY);
+  } catch (err) {
+    console.warn("SendGrid package not available or failed to initialize:", err.message);
+    sendgrid = null;
+  }
+}
 const { User, Session, Otp } = require("../models");
 const { generateSessionId, getNextId } = require("../utils/helpers");
 
@@ -269,6 +280,24 @@ const sendOTPViaSMS = async (mobile, otp) => {
 };
 
 const sendOTPViaEmail = async (email, otp) => {
+  // If SendGrid is configured, use it (more reliable on hosted platforms)
+  if (sendgrid) {
+    try {
+      const from = process.env.SENDGRID_FROM || process.env.SMTP_FROM || process.env.SMTP_USER;
+      await sendgrid.send({
+        to: email,
+        from,
+        subject: "Your Turf Booking OTP",
+        text: `Your OTP is ${otp}. Valid for 10 minutes. Do not share it with anyone.`,
+      });
+      return { success: true };
+    } catch (err) {
+      console.error("SendGrid send error:", err && err.message ? err.message : err);
+      // fall through to SMTP attempt as a backup
+    }
+  }
+
+  // Fallback to nodemailer SMTP transport
   try {
     const user = process.env.SMTP_USER || process.env.EMAIL_USER;
     const rawPass = process.env.SMTP_PASS || process.env.EMAIL_PASS;
