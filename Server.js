@@ -20,7 +20,9 @@ const localDevOrigin = /^http:\/\/(localhost|127\.0\.0\.1):\d+$/;
 app.use(
   cors({
     origin(origin, callback) {
-      if (!origin || allowedOrigins.has(origin) || localDevOrigin.test(origin)) {
+      const allowed = !origin || allowedOrigins.has(origin) || localDevOrigin.test(origin);
+      console.log(`CORS check origin=${origin} allowed=${allowed}`);
+      if (allowed) {
         return callback(null, true);
       }
 
