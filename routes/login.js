@@ -1,73 +1,46 @@
 const express = require("express");
 const router = express.Router();
-const { poolPromise } = require("../Config/dbconfig");
+const { User } = require("../models");
+const { getNextId } = require("../utils/helpers");
 
-// Login / Register using mobile number
 router.post("/login", async (req, res) => {
   try {
-    const { mobile } = req.body;
-
-    if (!mobile || mobile.length !== 10) {
-      return res.status(400).json({ message: "Invalid mobile number" });
+    let { mobile } = req.body;
+    if (!mobile) {
+      return res.status(400).json({ message: "Mobile number missing" });
     }
 
-    const pool = await poolPromise;
+    mobile = mobile.toString().replace(/^\+91/, "").trim();
 
-    // 1️⃣ Check if user already exists
-    const checkUser = await pool.request()
-      .input("mobile", mobile)
-      .query("SELECT * FROM Usertable WHERE Mobile_Number = @mobile");
+    if (!/^\d{10}$/.test(mobile)) {
+      return res.status(400).json({ message: "Invalid mobile number format" });
+    }
 
-    if (checkUser.recordset.length > 0) {
-      // Existing user → return details
+    let user = await User.findOne({ Mobile_Number: mobile }).lean();
+
+    if (user) {
       return res.json({
+        success: true,
         message: "Existing user",
-        user: checkUser.recordset[0]
+        user,
       });
     }
 
-    // 2️⃣ Insert new user → Trigger will generate User_ID
-    await pool.request()
-      .input("mobile", mobile)
-      .query(`INSERT INTO Usertable (Mobile_Number) VALUES (@mobile)`);
-
-    // Fetch newly created user
-    const newUser = await pool.request()
-      .input("mobile", mobile)
-      .query("SELECT * FROM Usertable WHERE Mobile_Number = @mobile");
+    const User_ID = await getNextId("userId", "UID", 4);
+    user = await User.create({ User_ID, Mobile_Number: mobile });
 
     return res.json({
+      success: true,
       message: "New user created",
-      user: newUser.recordset[0]
+      user: user.toObject(),
     });
-
   } catch (err) {
-    console.error("Error:", err);
-    res.status(500).json({ message: "Server error" });
+    console.error("Login Error:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Server error",
+    });
   }
 });
-
-router.get("/by-mobile/:mobile", async (req, res) => {
-  try {
-    const pool = await poolPromise;
-    const result = await pool.request()
-      .input("mobile", sql.VarChar, req.params.mobile)
-      .query(`
-        SELECT User_ID
-        FROM Usertable
-        WHERE Mobile_Number = @mobile
-      `);
-
-    if (result.recordset.length === 0) {
-      return res.status(404).json({ success: false });
-    }
-
-    res.json({ success: true, userId: result.recordset[0].User_ID });
-
-  } catch (err) {
-    res.status(500).json({ success: false });
-  }
-});
-
 
 module.exports = router;

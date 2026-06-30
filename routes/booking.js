@@ -1,250 +1,190 @@
-const express = require('express');
+const express = require("express");
 const router = express.Router();
-const sql = require('mssql');
-const { dbConfig } = require('../Config/dbconfig');
+const {
+  Booking,
+  BookingSlot,
+  Payment,
+  Slot,
+  SlotPrice,
+  BlockedSlot,
+  User,
+} = require("../models");
+const {
+  getNextId,
+  calculateBookingTotal,
+  getPricesForDate,
+  normalizeDate,
+} = require("../utils/helpers");
 
-// GET /api/slots - Get all available slots
-router.get('/slots', async (req, res) => {
-  try {
-    const pool = await sql.connect(dbConfig);
-    const result = await pool.request().query('SELECT SlotId, Timing, StartHour FROM Slot ORDER BY StartHour');
-    
-    console.log('[Slots] Found:', result.recordset.length);
-    res.json(result. recordset);
-  } catch (err) {
-    console.error('❌ Error fetching slots:', err);
-    res.status(500).json({ error: 'Failed to fetch slots' });
-  }
-});
+async function getLockedSlotsForDate(bookingDate, slotIds) {
+  if (!Array.isArray(slotIds) || slotIds.length === 0) return [];
 
-// GET /api/booked-slots - Get booked slots in date range
-router.get('/booked-slots', async (req, res) => {
-  try {
-    const { from, to } = req.query;
-    
-    if (!from || !to) {
-      return res.status(400).json({ error: 'from and to dates are required' });
-    }
+  return BlockedSlot.find({
+    BlockDate: bookingDate,
+    IsActive: true,
+    SlotId: { $in: slotIds },
+  }).lean();
+}
 
-    const pool = await sql.connect(dbConfig);
-    const result = await pool.request()
-      .input('fromDate', sql.Date, from)
-      .input('toDate', sql.Date, to)
-      .query(`
-        SELECT 
-          BS.BookingDate as date,
-          BS.SlotId as slotId,
-          S.Timing as timing,
-          S. Timing as timingKey
-        FROM BookingSlot BS
-        JOIN Slot S ON BS.SlotId = S.SlotId
-        WHERE BS.BookingDate BETWEEN @fromDate AND @toDate
-      `);
-
-    const blocked = result.recordset.map(row => ({
-      date:  row.date. toISOString().slice(0, 10),
-      slotId: row.slotId,
-      timing: row. timing,
-      timingKey: row.timingKey
-    }));
-
-    console.log('[Booked Slots]', from, 'to', to, '- Found:', blocked.length);
-    res.json({ blocked });
-  } catch (err) {
-    console.error('❌ Error fetching booked slots:', err);
-    res.status(500).json({ error: 'Failed to fetch booked slots' });
-  }
-});
-// ...  existing code ...
-
-// GET /api/booking/details/:bookingId - Get booking details for payment page
-router.get('/booking/details/:bookingId', async (req, res) => {
+router.get("/booking/details/:bookingId", async (req, res) => {
   try {
     const { bookingId } = req.params;
-    console.log('[Booking Details] Request for:', bookingId);
-
-    const pool = await sql.connect(dbConfig);
-
-    // Get booking with slots
-    const result = await pool.request()
-      .input('bookingId', sql.VarChar(10), bookingId)
-      .query(`
-        SELECT 
-          B.BookingId,
-          B.BookingDate,
-          B.User_ID,
-          BS.SlotId,
-          S.Timing,
-          S. StartHour,
-          CASE 
-            WHEN DATENAME(WEEKDAY, B. BookingDate) IN ('Saturday', 'Sunday')
-                 OR (DATENAME(WEEKDAY, B.BookingDate) = 'Friday' AND S.StartHour >= 18)
-            THEN SPW.Price
-            ELSE SPWD.Price
-          END as Price
-        FROM Booking B
-        JOIN BookingSlot BS ON B.BookingId = BS.BookingId
-        JOIN Slot S ON BS.SlotId = S.SlotId
-        LEFT JOIN SlotPrice SPWD ON SPWD.SlotId = S.SlotId AND SPWD.DayType = 'Weekday'
-        LEFT JOIN SlotPrice SPW ON SPW.SlotId = S. SlotId AND SPW.DayType = 'Weekend'
-        WHERE B.BookingId = @bookingId
-        ORDER BY S.StartHour
-      `);
-
-    if (result.recordset.length === 0) {
-      return res.status(404).json({ error: 'Booking not found' });
+    const booking = await Booking.findOne({ BookingId: bookingId }).lean();
+    if (!booking) {
+      return res.status(404).json({ error: "Booking not found" });
     }
 
-    const bookingDate = result.recordset[0]. BookingDate;
-    const userId = result.recordset[0]. User_ID;
+    const bookingSlots = await BookingSlot.find({ BookingId: bookingId }).lean();
+    const slotIds = bookingSlots.map((bs) => bs.SlotId);
+    const slots = await Slot.find({ SlotId: { $in: slotIds } })
+      .sort({ StartHour: 1 })
+      .lean();
 
-    const slots = result.recordset.map(row => ({
-      SlotId:  row.SlotId,
-      Timing: row.Timing,
-      StartHour: row.StartHour,
-      Price: row.Price
+    const { prices } = await getPricesForDate(booking.BookingDate);
+    const priceMap = Object.fromEntries(prices.map((p) => [p.SlotId, p.Price]));
+
+    const slotDetails = slots.map((s) => ({
+      SlotId: s.SlotId,
+      Timing: s.Timing,
+      StartHour: s.StartHour,
+      Price: priceMap[s.SlotId] || 0,
     }));
-
-    console.log('[Booking Details] Found:', { bookingId, bookingDate, slots:  slots.length });
 
     res.json({
       bookingId,
-      bookingDate,
-      userId,
-      slots
+      bookingDate: booking.BookingDate,
+      userId: booking.User_ID,
+      slots: slotDetails,
     });
-
   } catch (err) {
-    console.error('❌ Error fetching booking details:', err);
-    res.status(500).json({ error: 'Failed to fetch booking details' });
+    console.error("❌ Error fetching booking details:", err);
+    res.status(500).json({ error: "Failed to fetch booking details" });
   }
 });
-// POST /api/booking/create - Create new booking
-router.post('/booking/create', async (req, res) => {
-  const { userId, bookingDate, slotIds } = req.body;
 
-  console.log('[Booking Create] Request:', { userId, bookingDate, slotIds });
+router.post("/booking/create", async (req, res) => {
+  const { userId, adminId, name, mobileNumber, bookingDate, slotIds } = req.body;
 
-  if (!userId || !bookingDate || !slotIds || slotIds.length === 0) {
-    return res.status(400).json({ error: 'userId, bookingDate, and slotIds are required' });
+  if ((!userId && !adminId) || !bookingDate || !slotIds || slotIds.length === 0) {
+    return res.status(400).json({
+      error: "UserId or AdminId, bookingDate and slotIds are required",
+    });
   }
 
-  let pool;
-  let transaction;
+  const dateStr = normalizeDate(bookingDate);
 
   try {
-    pool = await sql.connect(dbConfig);
-    transaction = new sql.Transaction(pool);
-    await transaction.begin();
-
-    console.log('[Booking Create] Transaction started');
-
-    // 1. Insert into Booking table (trigger auto-generates BookingId)
-    const bookingRequest = new sql.Request(transaction);
-    const bookingResult = await bookingRequest
-      .input('userId', sql. VarChar(20), userId)
-      .input('bookingDate', sql.Date, bookingDate)
-      .query(`
-        INSERT INTO Booking (User_ID, BookingDate)
-        VALUES (@userId, @bookingDate);
-        
-        SELECT TOP 1 BookingId 
-        FROM Booking 
-        WHERE User_ID = @userId 
-        ORDER BY BookingId DESC;
-      `);
-
-    const bookingId = bookingResult.recordset[0].BookingId;
-    console.log('[Booking Create] ✅ Generated BookingId:', bookingId);
-
-    // 2. Insert slots into BookingSlot (trigger auto-fills BookingDate)
-    for (const slotId of slotIds) {
-      try {
-        const slotRequest = new sql.Request(transaction);
-        await slotRequest
-          .input('bookingId', sql.VarChar(10), bookingId)
-          .input('slotId', sql.VarChar(10), slotId)
-          .query(`
-            INSERT INTO BookingSlot (BookingId, SlotId)
-            VALUES (@bookingId, @slotId);
-          `);
-        console.log('[Booking Create] ✅ Added slot:', slotId);
-      } catch (slotErr) {
-        // Handle duplicate slot booking (UNIQUE constraint violation)
-        if (slotErr.number === 2627 || slotErr.number === 2601) {
-          console.log('[Booking Create] ❌ Slot already booked:', slotId);
-          await transaction.rollback();
-          return res.status(409).json({ 
-            error: 'One or more slots are already booked for this date',
-            slotId: slotId
-          });
-        }
-        throw slotErr;
-      }
+    const lockedSlots = await getLockedSlotsForDate(dateStr, slotIds);
+    if (lockedSlots.length > 0) {
+      return res.status(409).json({
+        error: "One or more selected slots are locked for this date",
+        lockedSlots: lockedSlots.map((row) => row.SlotId),
+      });
     }
 
-    // 3. Get total amount (calculated by trigger)
-    const paymentRequest = new sql.Request(transaction);
-    const paymentResult = await paymentRequest
-      . input('bookingId', sql. VarChar(10), bookingId)
-      .query(`
-        SELECT TotalAmount 
-        FROM Payment 
-        WHERE BookingId = @bookingId;
-      `);
+    const existing = await BookingSlot.find({
+      BookingDate: dateStr,
+      SlotId: { $in: slotIds },
+    }).lean();
 
-    const totalAmount = paymentResult.recordset[0]?.TotalAmount || 0;
-    console.log('[Booking Create] ✅ Total Amount:', totalAmount);
+    if (existing.length > 0) {
+      return res.status(409).json({
+        error: "Slot already booked for this date",
+        slotId: existing[0].SlotId,
+      });
+    }
 
-    await transaction.commit();
-    console.log('[Booking Create] ✅ Transaction committed');
+    let resolvedUserId = userId;
+    if (userId && /^\d{10}$/.test(String(userId))) {
+      const user = await User.findOne({ Mobile_Number: userId }).lean();
+      if (user) resolvedUserId = user.User_ID;
+    }
+
+    const bookingId = await getNextId("bookingId", "B", 4);
+    const totalAmount = await calculateBookingTotal(slotIds, dateStr);
+
+    await Booking.create({
+      BookingId: bookingId,
+      User_ID: resolvedUserId || null,
+      Admin_ID: adminId || null,
+      Name: name || null,
+      MobileNumber: mobileNumber || null,
+      BookingDate: dateStr,
+    });
+
+    for (const slotId of slotIds) {
+      await BookingSlot.create({
+        BookingId: bookingId,
+        SlotId: slotId,
+        BookingDate: dateStr,
+      });
+    }
+
+    const paymentId = await getNextId("paymentId", "P", 4);
+    await Payment.create({
+      PaymentId: paymentId,
+      BookingId: bookingId,
+      TotalAmount: totalAmount,
+      AmountPaid: 0,
+      BalanceAmount: totalAmount,
+      Status: totalAmount > 0 ? "Pending" : "Paid",
+    });
 
     res.json({
       success: true,
       bookingId,
-      totalAmount
+      totalAmount,
     });
-
   } catch (err) {
-    if (transaction) {
-      try {
-        await transaction.rollback();
-        console.log('[Booking Create] ❌ Transaction rolled back');
-      } catch (rollbackErr) {
-        console.error('❌ Error rolling back transaction:', rollbackErr);
-      }
+    if (err.code === 11000) {
+      return res.status(409).json({
+        error: "Slot already booked for this date",
+      });
     }
-    console.error('❌ Error creating booking:', err);
-    res.status(500).json({ error: 'Failed to create booking', details: err.message });
+
+    console.error("❌ Error creating booking:", err);
+    res.status(500).json({
+      error: "Failed to create booking",
+      details: err.message,
+    });
   }
 });
+
 router.get("/admin/bookings", async (req, res) => {
   try {
-    const pool = await sql.connect(dbConfig);
+    const bookings = await Booking.find().sort({ BookingDate: -1 }).lean();
+    const results = [];
 
-    const result = await pool.request().query(`
-      SELECT 
-        B.BookingId       AS BookingID,
-        U.Mobile_Number  AS CustomerMobile,
-        BS.BookingDate   AS BookingDate,
-        S.Timing         AS SlotTime,
-        P.TotalAmount    AS TotalAmount,
-        P.BalanceAmount  AS BalanceAmount,
-        P.Status         AS PaymentStatus
-      FROM Booking B
-      JOIN Usertable U   ON U.User_ID = B.User_ID
-      JOIN BookingSlot BS ON BS.BookingId = B.BookingId
-      JOIN Slot S        ON S.SlotId = BS.SlotId
-      JOIN Payment P     ON P.BookingId = B.BookingId
-      ORDER BY BS.BookingDate DESC, S.StartHour
-    `);
+    for (const b of bookings) {
+      const user = b.User_ID
+        ? await User.findOne({ User_ID: b.User_ID }).lean()
+        : null;
+      const bookingSlots = await BookingSlot.find({ BookingId: b.BookingId }).lean();
+      const slots = await Slot.find({
+        SlotId: { $in: bookingSlots.map((bs) => bs.SlotId) },
+      })
+        .sort({ StartHour: 1 })
+        .lean();
+      const payment = await Payment.findOne({ BookingId: b.BookingId }).lean();
 
-    res.json(result.recordset);
+      for (const slot of slots) {
+        results.push({
+          BookingID: b.BookingId,
+          CustomerMobile: user?.Mobile_Number || b.MobileNumber,
+          BookingDate: b.BookingDate,
+          SlotTime: slot.Timing,
+          TotalAmount: payment?.TotalAmount ?? 0,
+          BalanceAmount: payment?.BalanceAmount ?? 0,
+          PaymentStatus: payment?.Status ?? "Pending",
+        });
+      }
+    }
+
+    res.json(results);
   } catch (err) {
     console.error("Admin Booking Error:", err);
     res.status(500).json({ message: "Failed to load admin bookings" });
   }
 });
-
 
 module.exports = router;

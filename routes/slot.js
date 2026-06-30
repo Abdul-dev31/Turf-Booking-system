@@ -1,99 +1,92 @@
 const express = require("express");
 const router = express.Router();
-const sql = require("mssql");
-const { dbConfig } = require("../Config/dbconfig");
+const { Slot, BookingSlot, Booking, BlockedSlot } = require("../models");
+const { normalizeDate } = require("../utils/helpers");
 
+async function getBookedSlotIdsForDate(bookingDate) {
+  const rows = await BookingSlot.find({ BookingDate: bookingDate }).lean();
+  return rows.map((row) => row.SlotId);
+}
 
-// =================== GET ALL SLOTS ===================
+async function getLockedSlotIdsForDate(bookingDate) {
+  const rows = await BlockedSlot.find({
+    BlockDate: bookingDate,
+    IsActive: true,
+  }).lean();
+  return rows.map((row) => row.SlotId);
+}
+
 router.get("/slots", async (req, res) => {
   try {
-    const pool = await sql.connect(dbConfig);
-    const result = await pool.request()
-      .query("SELECT SlotId, Timing, StartHour FROM Slot ORDER BY StartHour");
-    res.json(result.recordset);
+    const { date } = req.query;
+    const slots = await Slot.find().sort({ StartHour: 1 }).lean();
+
+    if (!date) {
+      return res.json(slots);
+    }
+
+    const dateStr = normalizeDate(date);
+    const [bookedSlotIds, lockedSlotIds] = await Promise.all([
+      getBookedSlotIdsForDate(dateStr),
+      getLockedSlotIdsForDate(dateStr),
+    ]);
+
+    const bookedSet = new Set(bookedSlotIds);
+    const lockedSet = new Set(lockedSlotIds);
+
+    const result = slots.map((slot) => {
+      const status = bookedSet.has(slot.SlotId)
+        ? "booked"
+        : lockedSet.has(slot.SlotId)
+          ? "locked"
+          : "available";
+
+      return {
+        ...slot,
+        status,
+        isAvailable: status === "available",
+      };
+    });
+
+    res.json({ date: dateStr, slots: result });
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch slots" });
   }
 });
 
-
-// =================== GET BOOKED + BLOCKED SLOTS ===================
 router.get("/booked-slots", async (req, res) => {
   try {
     const { from, to } = req.query;
-    const pool = await sql.connect(dbConfig);
+    const fromDate = normalizeDate(from);
+    const toDate = normalizeDate(to);
 
-    const result = await pool.request()
-      .input("from", sql.Date, from)
-      .input("to", sql.Date, to)
-      .query(`
-        SELECT BookingDate AS date, SlotId FROM BookingSlot
-        WHERE BookingDate BETWEEN @from AND @to
+    const booked = await BookingSlot.find({
+      BookingDate: { $gte: fromDate, $lte: toDate },
+    }).lean();
 
-        UNION
+    const locked = await BlockedSlot.find({
+      BlockDate: { $gte: fromDate, $lte: toDate },
+      IsActive: true,
+    }).lean();
 
-        SELECT BlockDate AS date, SlotId FROM BlockedSlot
-        WHERE BlockDate BETWEEN @from AND @to
-      `);
+    const blocked = [
+      ...booked.map((b) => ({
+        date: b.BookingDate,
+        SlotId: b.SlotId,
+        source: "BOOKED",
+      })),
+      ...locked.map((b) => ({
+        date: b.BlockDate,
+        SlotId: b.SlotId,
+        source: "LOCKED",
+      })),
+    ];
 
-    res.json({ blocked: result.recordset });
+    res.json({ blocked });
   } catch (err) {
-    console.log(err);
+    console.log("booked-slots error:", err.message);
     res.status(500).json({ error: "Failed to load blocked slots" });
   }
 });
 
-
-// =================== ADMIN LOCK SLOTS ===================
-router.post("/admin/lock-slots", async (req, res) => {
-  try {
-    const { date, slotIds } = req.body;
-    const pool = await sql.connect(dbConfig);
-
-    for (const slotId of slotIds) {
-      await pool.request()
-        .input("slotId", sql.VarChar, slotId)
-        .input("date", sql.Date, date)
-        .query(`
-          IF NOT EXISTS (
-            SELECT 1 FROM BlockedSlot 
-            WHERE SlotId=@slotId AND BlockDate=@date
-          )
-          INSERT INTO BlockedSlot (SlotId, BlockDate)
-          VALUES (@slotId, @date)
-        `);
-    }
-
-    res.json({ message: "Slots locked successfully" });
-  } catch (err) {
-    console.log(err);
-    res.status(500).json({ error: "Failed to lock slots" });
-  }
-});
-
-
-// =================== ADMIN UNLOCK SLOTS ===================
-router.post("/admin/unlock-slots", async (req, res) => {
-  try {
-    const { date, slotIds } = req.body;
-    const pool = await sql.connect(dbConfig);
-
-    for (const slotId of slotIds) {
-      await pool.request()
-        .input("slotId", sql.VarChar, slotId)
-        .input("date", sql.Date, date)
-        .query(`
-          DELETE FROM BlockedSlot
-          WHERE SlotId=@slotId AND BlockDate=@date
-        `);
-    }
-
-    res.json({ message: "Slots unlocked successfully" });
-  } catch (err) {
-    res.status(500).json({ error: "Failed to unlock slots" });
-  }
-});
-
-
-// =================== EXPORT ===================
 module.exports = router;

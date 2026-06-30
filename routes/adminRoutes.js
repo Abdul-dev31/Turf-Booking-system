@@ -1,37 +1,42 @@
 const express = require("express");
 const router = express.Router();
-const sql = require("mssql");
-const { dbConfig } = require("../Config/dbconfig");
+const {
+  Booking,
+  BookingSlot,
+  Payment,
+  User,
+  Slot,
+} = require("../models");
 
-/*
- GET all user bookings for Admin
-*/
 router.get("/admin/booking", async (req, res) => {
   try {
-    const pool = await sql.connect(dbConfig);
+    const bookings = await Booking.find().sort({ BookingDate: -1 }).lean();
+    const results = [];
 
-    const result = await pool.request().query(`
-      SELECT 
-        B.BookingId,
-        U.Mobile_Number,
-        B.BookingDate,
-        STUFF((
-            SELECT ', ' + S.Timing
-            FROM BookingSlot BS2
-            JOIN Slot S ON BS2.SlotId = S.SlotId
-            WHERE BS2.BookingId = B.BookingId
-            FOR XML PATH('')
-        ),1,2,'') AS Slots,
-        P.TotalAmount,
-        P.BalanceAmount,
-        P.Status
-      FROM Booking B
-      JOIN Usertable U ON B.User_ID = U.User_ID
-      JOIN Payment P ON B.BookingId = P.BookingId
-      ORDER BY B.BookingDate DESC
-    `);
+    for (const b of bookings) {
+      const user = b.User_ID
+        ? await User.findOne({ User_ID: b.User_ID }).lean()
+        : null;
+      const bookingSlots = await BookingSlot.find({ BookingId: b.BookingId }).lean();
+      const slots = await Slot.find({
+        SlotId: { $in: bookingSlots.map((bs) => bs.SlotId) },
+      })
+        .sort({ StartHour: 1 })
+        .lean();
+      const payment = await Payment.findOne({ BookingId: b.BookingId }).lean();
 
-    res.json(result.recordset);
+      results.push({
+        BookingId: b.BookingId,
+        Mobile_Number: user?.Mobile_Number || b.MobileNumber,
+        BookingDate: b.BookingDate,
+        Slots: slots.map((s) => s.Timing).join(", "),
+        TotalAmount: payment?.TotalAmount ?? 0,
+        BalanceAmount: payment?.BalanceAmount ?? 0,
+        Status: payment?.Status ?? "Pending",
+      });
+    }
+
+    res.json(results);
   } catch (err) {
     console.error("Admin booking fetch error:", err);
     res.status(500).json({ error: "Failed to fetch bookings" });

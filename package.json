@@ -7,10 +7,12 @@
     "express": "^5.2.1",
     "express-session": "^1.18.2",
     "jsonwebtoken": "^9.0.2",
-    "mssql": "^12.2.0",
+    "mongoose": "^8.24.1",
+    "node-fetch": "^2.7.0",
     "nodemailer": "^7.0.10",
     "nodemon": "^3.1.10",
-    "razorpay": "^2.9.6"
+    "razorpay": "^2.9.6",
+    "twilio": "^5.12.1"
   },
   "name": "turf",
   "version": "1.0.0",
@@ -18,7 +20,8 @@
   "main": "Server.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node Server.js"
+    "start": "node Server.js",
+    "seed": "node scripts/seed.js"
   },
   "keywords": [],
   "author": "",
