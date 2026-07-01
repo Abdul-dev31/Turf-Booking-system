@@ -9,18 +9,24 @@ const { Admin } = require("./models");
 
 const app = express();
 
-const allowedOrigins = new Set([
+const defaultOrigins = [
   "http://localhost:3000",
   "http://localhost:5173",
   "http://localhost:5174",
   "https://turfbooking1.netlify.app",
-]);
+];
+const envOrigins = [process.env.FRONTEND_URL, process.env.CORS_ALLOWED_ORIGINS]
+  .flatMap((value) => (typeof value === "string" ? value.split(",") : []))
+  .map((value) => value.trim())
+  .filter(Boolean);
+const allowedOrigins = new Set([...defaultOrigins, ...envOrigins]);
 const localDevOrigin = /^http:\/\/(localhost|127\.0\.0\.1):\d+$/;
 
 app.use(
   cors({
     origin(origin, callback) {
-      const allowed = !origin || allowedOrigins.has(origin) || localDevOrigin.test(origin);
+      const normalizedOrigin = origin ? origin.trim() : "";
+      const allowed = !normalizedOrigin || allowedOrigins.has(normalizedOrigin) || localDevOrigin.test(normalizedOrigin);
       console.log(`CORS check origin=${origin} allowed=${allowed}`);
       if (allowed) {
         return callback(null, true);
@@ -28,6 +34,7 @@ app.use(
 
       return callback(new Error(`CORS blocked for origin: ${origin}`));
     },
+    credentials: true,
   })
 );
 app.use(bodyParser.json());
