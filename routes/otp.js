@@ -322,6 +322,10 @@ const sendOTPViaEmail = async (email, otp) => {
           }
     );
 
+    console.log("Verifying SMTP...");
+    await transporter.verify();
+    console.log("SMTP Verified");
+
     await transporter.sendMail({
       from: process.env.SMTP_FROM || user,
       to: email,
@@ -329,8 +333,10 @@ const sendOTPViaEmail = async (email, otp) => {
       text: `Your OTP is ${otp}. Valid for 10 minutes. Do not share it with anyone.`,
     });
 
+    console.log("Email sent successfully");
     return { success: true };
   } catch (err) {
+    console.error("SMTP Error:", err);
     console.log(`📧 OTP for ${email}: ${otp}`);
     return { success: false, error: err.message };
   }
